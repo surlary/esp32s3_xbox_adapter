@@ -21,7 +21,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/CMakeLists.txt esp32s3/ma
 +)
 diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32s3/main/esp_hid_host_main.c
 --- esp32s3_xbox_adapter-master/main/esp_hid_host_main.c	2024-07-07 16:29:35.000000000 +0800
-+++ esp32s3/main/esp_hid_host_main.c	2026-02-03 09:37:49.000000000 +0800
++++ esp32s3/main/esp_hid_host_main.c	2026-02-09 14:30:18.000000000 +0800
 @@ -11,6 +11,7 @@
  #include "freertos/FreeRTOS.h"
  #include "freertos/task.h"
@@ -30,7 +30,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
  #include "esp_system.h"
  #include "esp_wifi.h"
  #include "esp_event.h"
-@@ -29,6 +30,14 @@
+@@ -29,6 +30,12 @@
  #include "esp_hidh.h"
  #include "esp_hid_gap.h"
  #include "esp_timer.h"
@@ -39,13 +39,11 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
 +#include "led_strip.h"
 +#include "driver/gpio.h"
 +
-+// Button
-+#include "driver/gpio.h"
 +
  static const char *TAG = "xbox";
  
  #define XBOX_CONTROLLER_INDEX_BUTTONS_DIR 12
-@@ -36,7 +45,33 @@
+@@ -36,7 +43,33 @@
  #define XBOX_CONTROLLER_INDEX_BUTTONS_CENTER 14
  #define XBOX_CONTROLLER_INDEX_BUTTONS_SHARE 15
  
@@ -79,7 +77,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
  
  //static const uint16_t maxJoy = 0xffff;
  
-@@ -46,6 +81,115 @@
+@@ -46,6 +79,137 @@
  hid_ps4_report_t ps4_report = {};
  
  
@@ -172,6 +170,28 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
 +    }
 +}
 +
++// ISR-safe version of trigger_led_with_color
++void trigger_led_with_color_isr_safe(uint32_t red, uint32_t green, uint32_t blue) {
++    if (led_initialized) {
++        // Set the LED to the specified color
++        led_strip_set_pixel(led_strip, 0, (uint8_t)red, (uint8_t)green, (uint8_t)blue);
++        led_strip_refresh(led_strip);
++        
++        if (led_timer != NULL) {
++            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
++            
++            // Use timer API safe for ISR context
++            xTimerStopFromISR(led_timer, &xHigherPriorityTaskWoken);
++            xTimerStartFromISR(led_timer, &xHigherPriorityTaskWoken);
++            
++            // If xHigherPriorityTaskWoken was set to pdTRUE, a context switch should be requested
++            if (xHigherPriorityTaskWoken == pdTRUE) {
++                portYIELD_FROM_ISR();
++            }
++        }
++    }
++}
++
 +// Function to handle battery level change
 +void handle_battery_change(uint8_t battery_percentage) {
 +    battery_level_t current_level = get_battery_level(battery_percentage);
@@ -195,7 +215,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
  void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id, void *event_data)
  {
      esp_hidh_event_t event = (esp_hidh_event_t)id;
-@@ -71,6 +215,10 @@
+@@ -71,6 +235,10 @@
      {
          const uint8_t *bda = esp_hidh_dev_bda_get(param->battery.dev);
          ESP_LOGI(TAG, ESP_BD_ADDR_STR " BATTERY: %d%%", ESP_BD_ADDR_HEX(bda), param->battery.level);
@@ -206,7 +226,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
          break;
      }
      case ESP_HIDH_INPUT_EVENT:
-@@ -373,6 +521,79 @@
+@@ -373,6 +541,79 @@
      return ps4_desc_hid_report;
  }
  
@@ -221,7 +241,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
 +        if (!first_battery_event && last_battery_level != -1) {
 +            uint32_t red, green, blue;
 +            get_rgb_for_battery_level(last_battery_level, &red, &green, &blue);
-+            trigger_led_with_color(red, green, blue);
++            trigger_led_with_color_isr_safe(red, green, blue);
 +        }
 +    }
 +}
@@ -286,7 +306,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
  void app_main(void)
  {
      esp_err_t ret;
-@@ -385,6 +606,19 @@
+@@ -385,6 +626,19 @@
      }
      ESP_ERROR_CHECK(ret);
  
@@ -306,6 +326,102 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
      ps4_driver_init();
  
      ESP_LOGI(TAG, "USB initialization");
+diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/hid_ps4_driver.c esp32s3/main/hid_ps4_driver.c
+--- esp32s3_xbox_adapter-master/main/hid_ps4_driver.c	2024-07-07 16:29:35.000000000 +0800
++++ esp32s3/main/hid_ps4_driver.c	2026-02-09 14:14:10.000000000 +0800
+@@ -280,6 +280,8 @@
+ extern const unsigned char ps4_signature_start[] asm("_binary_sig_bin_start");
+ extern const unsigned char ps4_signature_end[] asm("_binary_sig_bin_end");
+ 
++// Global variable to store the converted binary serial data
++static uint8_t ps4_serial_binary[16] = {};
+ 
+ mbedtls_pk_context pk;
+ static hid_ps4_report_t last_report = {};
+@@ -420,6 +422,63 @@
+     return 0;
+ };
+ 
++// Helper function to convert a hex character to its integer value
++static uint8_t hex_char_to_int(char c)
++{
++    if (c >= '0' && c <= '9') {
++        return c - '0';
++    } else if (c >= 'A' && c <= 'F') {
++        return c - 'A' + 10;
++    } else if (c >= 'a' && c <= 'f') {
++        return c - 'a' + 10;
++    }
++    return 0; // Invalid hex character
++}
++
++// Helper function to convert hex string to binary data
++static void hex_string_to_binary(const unsigned char *hex_str, size_t hex_len, uint8_t *output, size_t output_size)
++{
++    size_t output_idx = 0;
++    size_t i = 0;
++    
++    // Process the hex string in pairs of characters
++    while (i < hex_len && output_idx < output_size) {
++        // Skip non-hex characters (like spaces or newlines)
++        if (!((hex_str[i] >= '0' && hex_str[i] <= '9') || 
++              (hex_str[i] >= 'A' && hex_str[i] <= 'F') || 
++              (hex_str[i] >= 'a' && hex_str[i] <= 'f'))) {
++            i++;
++            continue;
++        }
++        
++        // Make sure we have a pair of hex characters
++        if (i + 1 < hex_len) {
++            uint8_t high_nibble = hex_char_to_int(hex_str[i]);
++            uint8_t low_nibble = hex_char_to_int(hex_str[i + 1]);
++            output[output_idx] = (high_nibble << 4) | low_nibble;
++            output_idx++;
++            i += 2; // Move to next pair
++        } else {
++            // Odd number of hex characters - treat as error, skip
++            i++;
++        }
++    }
++    
++    // If we have space left in the output buffer, pad with zeros at the beginning
++    if (output_idx < output_size) {
++        // Shift the data to the right and fill the beginning with zeros
++        size_t data_start = output_size - output_idx;
++        // Move existing data to the right
++        for (int j = output_idx - 1; j >= 0; j--) {
++            output[data_start + j] = output[j];
++        }
++        // Fill the beginning with zeros
++        for (size_t j = 0; j < data_start; j++) {
++            output[j] = 0;
++        }
++    }
++}
++
+ void sign_nonce(void)
+ {
+ 
+@@ -448,7 +507,7 @@
+         int offset = 0;
+         memcpy(&ps4_auth_buffer[offset], nonce_signature, 256);
+         offset += 256;
+-        memcpy(&ps4_auth_buffer[offset], ps4_serial_start, 16);
++        memcpy(&ps4_auth_buffer[offset], ps4_serial_binary, 16);
+         offset += 16;
+         // mbedtls_mpi *mpi = static_cast<mbedtls_mpi *>(&rsa_context->N);
+         mbedtls_mpi_write_binary(&rsa->MBEDTLS_PRIVATE(N), &ps4_auth_buffer[offset], 256);
+@@ -549,6 +608,10 @@
+     memset(ps4_auth_buffer, 0, sizeof(ps4_auth_buffer));
+     memset(ps4_auth_nonce_buffer, 0, sizeof(ps4_auth_nonce_buffer));
+ 
++    // Convert hex string from serial.txt to binary and store in global variable
++    size_t serial_len = ps4_serial_end - ps4_serial_start;
++    hex_string_to_binary(ps4_serial_start, serial_len, ps4_serial_binary, 16);
++
+     int ret = 0;
+     mbedtls_pk_init(&pk);
+     ret = mbedtls_pk_parse_key(&pk, (uint8_t *)key_pem_start, key_pem_end - key_pem_start, NULL, 0, rng, NULL);
 diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/idf_component.yml esp32s3/main/idf_component.yml
 --- esp32s3_xbox_adapter-master/main/idf_component.yml	2024-07-07 16:29:35.000000000 +0800
 +++ esp32s3/main/idf_component.yml	2026-02-02 10:55:17.000000000 +0800
