@@ -1,6 +1,6 @@
-diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/CMakeLists.txt esp32s3/main/CMakeLists.txt
---- esp32s3_xbox_adapter-master/main/CMakeLists.txt	2024-07-07 16:29:35.000000000 +0800
-+++ esp32s3/main/CMakeLists.txt	2026-02-02 11:18:16.000000000 +0800
+diff -urN -x '*.json' esp32s3_org/main/CMakeLists.txt esp32s3_patch/main/CMakeLists.txt
+--- esp32s3_org/main/CMakeLists.txt	2026-02-09 18:15:49.000000000 +0800
++++ esp32s3_patch/main/CMakeLists.txt	2026-02-24 08:59:34.000000000 +0800
 @@ -1,10 +1,7 @@
 -set(srcs "esp_hid_host_main.c"
 -         "esp_hid_gap.c"
@@ -19,9 +19,9 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/CMakeLists.txt esp32s3/ma
 +    PRIV_REQUIRES bt esp_hid driver esp_tinyusb led_strip nvs_flash
 +    EMBED_TXTFILES "key.pem" "serial.txt" "sig.bin"
 +)
-diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32s3/main/esp_hid_host_main.c
---- esp32s3_xbox_adapter-master/main/esp_hid_host_main.c	2024-07-07 16:29:35.000000000 +0800
-+++ esp32s3/main/esp_hid_host_main.c	2026-02-09 14:30:18.000000000 +0800
+diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/esp_hid_host_main.c
+--- esp32s3_org/main/esp_hid_host_main.c	2026-02-09 18:15:49.000000000 +0800
++++ esp32s3_patch/main/esp_hid_host_main.c	2026-02-24 10:18:43.000000000 +0800
 @@ -11,6 +11,7 @@
  #include "freertos/FreeRTOS.h"
  #include "freertos/task.h"
@@ -43,7 +43,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
  static const char *TAG = "xbox";
  
  #define XBOX_CONTROLLER_INDEX_BUTTONS_DIR 12
-@@ -36,7 +43,33 @@
+@@ -36,7 +43,37 @@
  #define XBOX_CONTROLLER_INDEX_BUTTONS_CENTER 14
  #define XBOX_CONTROLLER_INDEX_BUTTONS_SHARE 15
  
@@ -53,7 +53,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
 +#define LED_BRIGHTNESS_FACTOR 0.5  // 50% brightness
 +
 +// GPIO for boot button
-+#define BOOT_BUTTON_GPIO 0  // Usually GPIO 0 is the boot button on ESP32-S3
++#define BOOT_BUTTON_GPIO 0
 +
 +// Battery level ranges for color mapping
 +typedef enum {
@@ -70,19 +70,28 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
 +static bool led_initialized = false;
 +static battery_level_t last_battery_level = -1;  // Initialize to invalid value
 +static bool first_battery_event = true;  // Track if it's the first battery event
-+static bool button_pressed = false;  // Track button state
++static volatile bool led_trigger_pending = false;  // Flag to trigger LED from ISR/task (volatile for ISR safety)
++static volatile int64_t last_button_press_time = 0;  // Timestamp for debouncing (volatile for ISR safety)
  
 +// Timer for LED control
 +static TimerHandle_t led_timer = NULL;
++
++// Button debounce time in microseconds (50ms)
++#define BUTTON_DEBOUNCE_US 500000
  
  //static const uint16_t maxJoy = 0xffff;
  
-@@ -46,6 +79,137 @@
+@@ -46,6 +83,124 @@
  hid_ps4_report_t ps4_report = {};
  
  
 +// Function to determine battery level based on percentage
 +battery_level_t get_battery_level(uint8_t battery_percentage) {
++    // Clamp battery percentage to valid range [0, 100]
++    if (battery_percentage > 100) {
++        battery_percentage = 100;
++    }
++    
 +    if (battery_percentage <= 5) {
 +        return BATTERY_LEVEL_ORANGE;
 +    } else if (battery_percentage <= 25) {
@@ -148,49 +157,31 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
 +
 +// LED timer callback to turn off the LED after 300ms
 +void led_timer_callback(TimerHandle_t xTimer) {
-+    if (led_initialized) {
++    if (led_initialized && led_strip != NULL) {
 +        // Turn off the LED
-+        led_strip_set_pixel(led_strip, 0, 0, 0, 0);
-+        led_strip_refresh(led_strip);
++        esp_err_t err = led_strip_set_pixel(led_strip, 0, 0, 0, 0);
++        if (err == ESP_OK) {
++            led_strip_refresh(led_strip);
++        }
 +    }
 +}
 +
 +// Function to trigger LED with specific color for 300ms
 +void trigger_led_with_color(uint32_t red, uint32_t green, uint32_t blue) {
-+    if (led_initialized) {
++    if (led_initialized && led_strip != NULL && led_timer != NULL) {
 +        // Set the LED to the specified color
-+        led_strip_set_pixel(led_strip, 0, (uint8_t)red, (uint8_t)green, (uint8_t)blue);
-+        led_strip_refresh(led_strip);
++        esp_err_t err = led_strip_set_pixel(led_strip, 0, (uint8_t)red, (uint8_t)green, (uint8_t)blue);
++        if (err == ESP_OK) {
++            led_strip_refresh(led_strip);
++        }
 +        
 +        // Restart the timer to turn off the LED after 300ms
-+        if (led_timer != NULL) {
-+            xTimerStop(led_timer, 0);
-+            xTimerStart(led_timer, 0);
-+        }
++        xTimerStop(led_timer, 0);
++        xTimerStart(led_timer, 0);
 +    }
 +}
 +
-+// ISR-safe version of trigger_led_with_color
-+void trigger_led_with_color_isr_safe(uint32_t red, uint32_t green, uint32_t blue) {
-+    if (led_initialized) {
-+        // Set the LED to the specified color
-+        led_strip_set_pixel(led_strip, 0, (uint8_t)red, (uint8_t)green, (uint8_t)blue);
-+        led_strip_refresh(led_strip);
-+        
-+        if (led_timer != NULL) {
-+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-+            
-+            // Use timer API safe for ISR context
-+            xTimerStopFromISR(led_timer, &xHigherPriorityTaskWoken);
-+            xTimerStartFromISR(led_timer, &xHigherPriorityTaskWoken);
-+            
-+            // If xHigherPriorityTaskWoken was set to pdTRUE, a context switch should be requested
-+            if (xHigherPriorityTaskWoken == pdTRUE) {
-+                portYIELD_FROM_ISR();
-+            }
-+        }
-+    }
-+}
++
 +
 +// Function to handle battery level change
 +void handle_battery_change(uint8_t battery_percentage) {
@@ -215,7 +206,7 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
  void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id, void *event_data)
  {
      esp_hidh_event_t event = (esp_hidh_event_t)id;
-@@ -71,6 +235,10 @@
+@@ -71,6 +226,10 @@
      {
          const uint8_t *bda = esp_hidh_dev_bda_get(param->battery.dev);
          ESP_LOGI(TAG, ESP_BD_ADDR_STR " BATTERY: %d%%", ESP_BD_ADDR_HEX(bda), param->battery.level);
@@ -226,22 +217,23 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
          break;
      }
      case ESP_HIDH_INPUT_EVENT:
-@@ -373,6 +541,79 @@
+@@ -373,10 +532,128 @@
      return ps4_desc_hid_report;
  }
  
-+// GPIO interrupt handler for boot button
++// GPIO interrupt handler for boot button with debouncing
 +static void IRAM_ATTR gpio_isr_handler(void* arg)
 +{
 +    uint32_t gpio_num = (uint32_t) arg;
 +    if (gpio_num == BOOT_BUTTON_GPIO) {
-+        button_pressed = true;
++        // Get current time in microseconds
++        int64_t current_time = esp_timer_get_time();
 +        
-+        // Get current battery level and trigger LED
-+        if (!first_battery_event && last_battery_level != -1) {
-+            uint32_t red, green, blue;
-+            get_rgb_for_battery_level(last_battery_level, &red, &green, &blue);
-+            trigger_led_with_color_isr_safe(red, green, blue);
++        // Check if enough time has passed since last button press (debouncing)
++        if ((current_time - last_button_press_time) > BUTTON_DEBOUNCE_US) {
++            last_button_press_time = current_time;
++            // Set flag to true (single direction: ISR only sets, task only clears)
++            led_trigger_pending = true;
 +        }
 +    }
 +}
@@ -249,6 +241,10 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
 +// Initialize LED strip
 +esp_err_t init_led_strip(void)
 +{
++    // Reset LED state
++    led_initialized = false;
++    led_strip = NULL;
++    
 +    // LED strip general initialization, according to your led board design
 +    led_strip_config_t strip_config = {
 +        .strip_gpio_num = LED_GPIO,   // The GPIO that connected to the LED strip's data line
@@ -266,14 +262,43 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
 +    };
 +
 +    // Initialize the RMT channel to drive the LED strip
-+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
++    esp_err_t ret = led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip);
++    if (ret != ESP_OK) {
++        ESP_LOGE(TAG, "Failed to initialize LED strip: %s", esp_err_to_name(ret));
++        return ret;
++    }
 +
 +    // Clear the LED strip (turn off all LEDs)
-+    led_strip_clear(led_strip);
++    ret = led_strip_clear(led_strip);
++    if (ret != ESP_OK) {
++        ESP_LOGE(TAG, "Failed to clear LED strip: %s", esp_err_to_name(ret));
++        return ret;
++    }
 +    
 +    led_initialized = true;
++    ESP_LOGI(TAG, "LED strip initialized successfully on GPIO %d", LED_GPIO);
 +    
 +    return ESP_OK;
++}
++
++// Task to handle LED updates from button press
++void led_button_task(void *pvParameters)
++{
++    while (1) {
++        // Check the trigger flag
++        if (led_trigger_pending && led_initialized && last_battery_level != -1) {
++            // Clear flag with critical section to prevent race condition
++            portDISABLE_INTERRUPTS();
++            led_trigger_pending = false;
++            portENABLE_INTERRUPTS();
++            
++            uint32_t red, green, blue;
++            get_rgb_for_battery_level(last_battery_level, &red, &green, &blue);
++            trigger_led_with_color(red, green, blue);
++        }
++        
++        vTaskDelay(pdMS_TO_TICKS(1000));
++    }
 +}
 +
 +// Initialize boot button
@@ -287,17 +312,26 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
 +        .pull_down_en = GPIO_PULLDOWN_DISABLE,
 +        .intr_type = GPIO_INTR_NEGEDGE  // Trigger on falling edge (button pressed)
 +    };
-+    ESP_ERROR_CHECK(gpio_config(&io_conf));
++    
++    esp_err_t ret = gpio_config(&io_conf);
++    if (ret != ESP_OK) {
++        ESP_LOGE(TAG, "Failed to configure boot button GPIO: %s", esp_err_to_name(ret));
++        return ret;
++    }
 +
 +    // Install GPIO ISR service
-+    // 推荐写法
-+    esp_err_t err = gpio_install_isr_service(0);
-+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-+        return err; // 只有在真正的错误（如内存不足）时才报错
++    ret = gpio_install_isr_service(0);
++    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
++        ESP_LOGE(TAG, "Failed to install GPIO ISR service: %s", esp_err_to_name(ret));
++        return ret;
 +    }
 +
 +    // Add ISR handler for the boot button
-+    ESP_ERROR_CHECK(gpio_isr_handler_add(BOOT_BUTTON_GPIO, gpio_isr_handler, (void*)BOOT_BUTTON_GPIO));
++    ret = gpio_isr_handler_add(BOOT_BUTTON_GPIO, gpio_isr_handler, (void*)BOOT_BUTTON_GPIO);
++    if (ret != ESP_OK) {
++        ESP_LOGE(TAG, "Failed to add ISR handler: %s", esp_err_to_name(ret));
++        return ret;
++    }
 +
 +    ESP_LOGI(TAG, "Boot button initialized on GPIO %d", BOOT_BUTTON_GPIO);
 +    return ESP_OK;
@@ -306,29 +340,56 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/esp_hid_host_main.c esp32
  void app_main(void)
  {
      esp_err_t ret;
-@@ -385,6 +626,19 @@
+ 
++    ESP_LOGI(TAG, "Starting Xbox to PS4/PC HID converter");
++
+     ret = nvs_flash_init();
+     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+     {
+@@ -385,6 +662,31 @@
      }
      ESP_ERROR_CHECK(ret);
  
-+    // Initialize LED strip
-+    ESP_ERROR_CHECK(init_led_strip());
++    // Initialize LED strip first
++    ret = init_led_strip();
++    if (ret != ESP_OK) {
++        ESP_LOGE(TAG, "Failed to initialize LED strip, continuing without LED support");
++        // Continue without LED support
++        led_initialized = false;
++    }
 +    
 +    // Create the timer for LED control (300ms timeout)
 +    led_timer = xTimerCreate("led_timer", pdMS_TO_TICKS(300), pdFALSE, (void*)0, led_timer_callback);
 +    if (led_timer == NULL) {
 +        ESP_LOGE(TAG, "Failed to create LED timer");
-+        return;
++        // Continue without timer support
 +    }
 +
 +    // Initialize boot button
-+    ESP_ERROR_CHECK(init_boot_button());
++    ret = init_boot_button();
++    if (ret != ESP_OK) {
++        ESP_LOGE(TAG, "Failed to initialize boot button, continuing without button support");
++        // Continue without button support
++    }
++    
++    // Create LED button task to handle button-triggered LED updates
++    xTaskCreate(&led_button_task, "led_button_task", 2048, NULL, 5, NULL);
 +
      ps4_driver_init();
  
      ESP_LOGI(TAG, "USB initialization");
-diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/hid_ps4_driver.c esp32s3/main/hid_ps4_driver.c
---- esp32s3_xbox_adapter-master/main/hid_ps4_driver.c	2024-07-07 16:29:35.000000000 +0800
-+++ esp32s3/main/hid_ps4_driver.c	2026-02-09 14:14:10.000000000 +0800
+@@ -410,5 +712,7 @@
+     };
+     ESP_ERROR_CHECK(esp_hidh_init(&config));
+ 
+-    xTaskCreate(&hid_task, "hid_task", 6 * 1024, NULL, 2, NULL);
++    xTaskCreate(&hid_task, "hid_task", 6 * 1024, NULL, 10, NULL);
++
++    ESP_LOGI(TAG, "System initialization completed");
+ }
+diff -urN -x '*.json' esp32s3_org/main/hid_ps4_driver.c esp32s3_patch/main/hid_ps4_driver.c
+--- esp32s3_org/main/hid_ps4_driver.c	2026-02-09 18:15:49.000000000 +0800
++++ esp32s3_patch/main/hid_ps4_driver.c	2026-02-24 08:59:34.000000000 +0800
 @@ -280,6 +280,8 @@
  extern const unsigned char ps4_signature_start[] asm("_binary_sig_bin_start");
  extern const unsigned char ps4_signature_end[] asm("_binary_sig_bin_end");
@@ -422,9 +483,9 @@ diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/hid_ps4_driver.c esp32s3/
      int ret = 0;
      mbedtls_pk_init(&pk);
      ret = mbedtls_pk_parse_key(&pk, (uint8_t *)key_pem_start, key_pem_end - key_pem_start, NULL, 0, rng, NULL);
-diff -urN -x '*.json' esp32s3_xbox_adapter-master/main/idf_component.yml esp32s3/main/idf_component.yml
---- esp32s3_xbox_adapter-master/main/idf_component.yml	2024-07-07 16:29:35.000000000 +0800
-+++ esp32s3/main/idf_component.yml	2026-02-02 10:55:17.000000000 +0800
+diff -urN -x '*.json' esp32s3_org/main/idf_component.yml esp32s3_patch/main/idf_component.yml
+--- esp32s3_org/main/idf_component.yml	2026-02-09 18:15:49.000000000 +0800
++++ esp32s3_patch/main/idf_component.yml	2026-02-24 08:59:34.000000000 +0800
 @@ -1,4 +1,5 @@
  ## IDF Component Manager Manifest File
  dependencies:
