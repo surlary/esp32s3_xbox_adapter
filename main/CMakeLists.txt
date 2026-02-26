@@ -8,3 +8,6 @@ idf_component_register(SRCS "${srcs}"
                        REQUIRES driver esp_hid mbedtls esp_timer
                        PRIV_REQUIRES nvs_flash
 		       EMBED_TXTFILES "key.pem" "serial.txt" "sig.bin")
+
+
+spiffs_create_partition_image(webroot ../webroot)
