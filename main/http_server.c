@@ -8,7 +8,6 @@
 #include "esp_log.h"
 #include "esp_vfs.h"
 #include "esp_spiffs.h"
-#include "cJSON.h"
 #include <string.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -128,49 +127,6 @@ struct file_server_data {
     char scratch[SCRATCH_BUFSIZE];
 };
 
-static const char *INDEX_HTML_CONTENT = 
-"<!DOCTYPE html>"
-"<html>"
-"<head>"
-"  <meta charset=\"utf-8\">"
-"  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-"  <title>ESP32-S3 HID Bridge Setup</title>"
-"  <style>"
-"    body { font-family: Arial, sans-serif; margin: 40px; background-color: #f0f0f0; }"
-"    .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }"
-"    h1 { color: #333; text-align: center; }"
-"    .status { padding: 10px; margin: 10px 0; border-radius: 5px; background-color: #e7f3ff; }"
-"    .btn { background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 10px 5px; }"
-"    .btn-scan { background-color: #2196F3; }"
-"    .btn-config { background-color: #FF9800; }"
-"    .hidden { display: none; }"
-"  </style>"
-"</head>"
-"<body>"
-"  <div class='container'>"
-"    <h1>HID Bridge Configuration</h1>"
-"    <div class='status' id='status'>"
-"      <strong>Status:</strong> Connected to configuration portal<br>"
-"      Device is in AP mode waiting for HID device connection."
-"    </div>"
-"    <p>Use this portal to configure your device settings:</p>"
-"    <a href='/scan' class='btn btn-scan'>Scan for HID Devices</a>"
-"    <a href='/config' class='btn'>Device Configuration</a>"
-"    <a href='/status' class='btn'>View Status</a>"
-"    <div id='content'></div>"
-"  </div>"
-"  <script>"
-"    function loadContent(url, elementId) {"
-"      fetch(url)"
-"        .then(response => response.text())"
-"        .then(data => {"
-"          document.getElementById(elementId).innerHTML = data;"
-"        })"
-"        .catch(error => console.error('Error:', error));"
-"    }"
-"  </script>"
-"</body>"
-"</html>";
 
 /* Redirect page with meta refresh */
 static const char *REDIRECT_PAGE = 
@@ -261,17 +217,8 @@ static esp_err_t smart_captive_portal_handler(httpd_req_t *req) {
     char client_ip[16];
     esp_err_t err = get_client_ip(req, client_ip, sizeof(client_ip));
     
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get client IP: %s", esp_err_to_name(err));
-        // Fallback to regular captive portal
-        httpd_resp_set_type(req, "text/html");
-        httpd_resp_set_hdr(req, "Content-Encoding", "identity");
-        httpd_resp_send(req, INDEX_HTML_CONTENT, strlen(INDEX_HTML_CONTENT));
-        return ESP_OK;
-    }
-
     // Check if this client IP has already visited
-    if (is_client_ip_tracked(client_ip)) {
+    if (err == ESP_OK && is_client_ip_tracked(client_ip)) {
         // IP exists, serve the file normally
         return send_file(req);
     } else {
@@ -283,6 +230,33 @@ static esp_err_t smart_captive_portal_handler(httpd_req_t *req) {
         httpd_resp_send(req, REDIRECT_PAGE, strlen(REDIRECT_PAGE));
         return ESP_OK;
     }
+}
+
+static const char *get_path_from_uri(char *dest, const char *base_path, const char *uri, size_t destsize)
+{
+    const size_t base_pathlen = strlen(base_path);
+    size_t pathlen = strlen(uri);
+    
+    const char *quest = strchr(uri, '?');
+    if (quest) {
+        pathlen = MIN(pathlen, quest - uri);
+    }
+    const char *hash = strchr(uri, '#');
+    if (hash) {
+        pathlen = MIN(pathlen, hash - uri);
+    }
+    
+    if (base_pathlen + pathlen + 1 > destsize) {
+        return NULL;
+    }
+    
+    strcpy(dest, base_path);
+    strlcpy(dest + base_pathlen, uri, pathlen + 1);
+    char *lastslash = strrchr(dest, '/');
+    if (lastslash) {
+        *(lastslash + 1) = '\0';
+    }
+    return dest;
 }
 
 /* Send HTTP response with the contents of the requested file */
@@ -423,7 +397,7 @@ esp_err_t http_server_start(int port)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.port = port;
+    config.server_port = port;
     config.uri_match_fn = httpd_uri_match_wildcard;
     
     struct file_server_data *server_data = calloc(1, sizeof(struct file_server_data));
@@ -433,7 +407,7 @@ esp_err_t http_server_start(int port)
     }
     strncpy(server_data->base_path, s_base_path, sizeof(server_data->base_path));
 
-    ESP_LOGI(TAG, "Starting HTTP Server on port: %d", config.port);
+    ESP_LOGI(TAG, "Starting HTTP Server on port: %d", config.server_port);
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");
         free(server_data);

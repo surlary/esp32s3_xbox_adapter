@@ -585,9 +585,11 @@ void hid_task(void *pvParameters)
         }
         // free the results
         esp_hid_scan_results_free(results);
-        
-        // If we found devices, continue with normal operation
-        ESP_LOGI(TAG, "HID devices found, continuing with normal operation");
+
+        if (!cr) {
+            ESP_LOGI(TAG, "No HID devices found, switching to AP mode");
+            xTaskCreate(&ap_mode_task, "ap_mode_task", 8 * 1024, NULL, 5, NULL);
+        }
     }
     else
     {

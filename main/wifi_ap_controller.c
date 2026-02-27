@@ -175,12 +175,6 @@ esp_err_t wifi_ap_controller_init(const char *ssid, const char *password, const 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     
-    // Set default interface
-    ESP_ERROR_CHECK(esp_netif_set_default_wifi_ap());
-    
-    // Set WiFi mode to AP
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    
     // Configure AP parameters
     wifi_config_t wifi_config = {0};
     strcpy((char*)wifi_config.ap.ssid, ssid ? ssid : "ESP32-S3-HID-Bridge");
@@ -202,17 +196,14 @@ esp_err_t wifi_ap_controller_init(const char *ssid, const char *password, const 
         strcpy(s_ap_ip, ip_addr);
     }
     
-    // Set static IP for AP
-    esp_netif_ip_info_t ip_info;
-    memset(&ip_info, 0, sizeof(esp_netif_ip_info_t));
-    
     // Set IP address
-    esp_netif_str_to_ip4(s_ap_ip, &ip_info.ip);
-    esp_netif_str_to_ip4("255.255.255.0", &ip_info.netmask);
-    esp_netif_str_to_ip4(s_ap_ip, &ip_info.gw); // Gateway is the AP itself
+    esp_netif_ip4_info_t ip4_info;
+    esp_netif_str_to_ip4(s_ap_ip, &ip4_info.ip);
+    esp_netif_str_to_ip4("255.255.255.0", &ip4_info.netmask);
+    ip4_info.gw = ip4_info.ip; // Gateway is the AP itself
     
     esp_netif_dhcps_stop(s_ap_netif); // Stop DHCP server first
-    esp_netif_set_ip_info(s_ap_netif, &ip_info);
+    esp_netif_set_ip_info(s_ap_netif, &ip4_info);
     esp_netif_dhcps_start(s_ap_netif); // Start DHCP server
     
     ESP_LOGI(TAG, "WiFi AP configured with IP: %s", s_ap_ip);
