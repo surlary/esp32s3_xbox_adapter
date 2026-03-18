@@ -1,6 +1,6 @@
-diff -urN -x '*.json' esp32s3_org/main/CMakeLists.txt esp32s3_patch/main/CMakeLists.txt
+diff -urN -x '*.json' -x '*.md' -x .DS_Store -x '*.patch' esp32s3_org/main/CMakeLists.txt esp32s3_patch/main/CMakeLists.txt
 --- esp32s3_org/main/CMakeLists.txt	2026-02-09 18:15:49.000000000 +0800
-+++ esp32s3_patch/main/CMakeLists.txt	2026-02-24 08:59:34.000000000 +0800
++++ esp32s3_patch/main/CMakeLists.txt	2026-03-16 09:31:33.000000000 +0800
 @@ -1,10 +1,7 @@
 -set(srcs "esp_hid_host_main.c"
 -         "esp_hid_gap.c"
@@ -19,9 +19,9 @@ diff -urN -x '*.json' esp32s3_org/main/CMakeLists.txt esp32s3_patch/main/CMakeLi
 +    PRIV_REQUIRES bt esp_hid driver esp_tinyusb led_strip nvs_flash
 +    EMBED_TXTFILES "key.pem" "serial.txt" "sig.bin"
 +)
-diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/esp_hid_host_main.c
+diff -urN -x '*.json' -x '*.md' -x .DS_Store -x '*.patch' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/esp_hid_host_main.c
 --- esp32s3_org/main/esp_hid_host_main.c	2026-02-09 18:15:49.000000000 +0800
-+++ esp32s3_patch/main/esp_hid_host_main.c	2026-02-24 10:18:43.000000000 +0800
++++ esp32s3_patch/main/esp_hid_host_main.c	2026-03-16 10:22:04.000000000 +0800
 @@ -11,6 +11,7 @@
  #include "freertos/FreeRTOS.h"
  #include "freertos/task.h"
@@ -43,7 +43,7 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
  static const char *TAG = "xbox";
  
  #define XBOX_CONTROLLER_INDEX_BUTTONS_DIR 12
-@@ -36,7 +43,37 @@
+@@ -36,7 +43,41 @@
  #define XBOX_CONTROLLER_INDEX_BUTTONS_CENTER 14
  #define XBOX_CONTROLLER_INDEX_BUTTONS_SHARE 15
  
@@ -72,6 +72,10 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
 +static bool first_battery_event = true;  // Track if it's the first battery event
 +static volatile bool led_trigger_pending = false;  // Flag to trigger LED from ISR/task (volatile for ISR safety)
 +static volatile int64_t last_button_press_time = 0;  // Timestamp for debouncing (volatile for ISR safety)
++
++// Additional global variables for battery update handling
++static volatile bool battery_update_pending = false;
++static volatile uint8_t pending_battery_level = 0;
  
 +// Timer for LED control
 +static TimerHandle_t led_timer = NULL;
@@ -81,7 +85,7 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
  
  //static const uint16_t maxJoy = 0xffff;
  
-@@ -46,6 +83,124 @@
+@@ -46,6 +87,124 @@
  hid_ps4_report_t ps4_report = {};
  
  
@@ -128,7 +132,7 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
 +            break;
 +        case BATTERY_LEVEL_YELLOW:
 +            *red = 255 * LED_BRIGHTNESS_FACTOR;   // Yellow: (255, 255, 0) -> (128, 128, 0)
-+            *green = 255 * LED_BRIGHTNESS_FACTOR;
++            *green = 191 * LED_BRIGHTNESS_FACTOR;
 +            *blue = 0 * LED_BRIGHTNESS_FACTOR;
 +            break;
 +        case BATTERY_LEVEL_BLUE:
@@ -206,18 +210,19 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
  void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id, void *event_data)
  {
      esp_hidh_event_t event = (esp_hidh_event_t)id;
-@@ -71,6 +226,10 @@
+@@ -71,6 +230,11 @@
      {
          const uint8_t *bda = esp_hidh_dev_bda_get(param->battery.dev);
          ESP_LOGI(TAG, ESP_BD_ADDR_STR " BATTERY: %d%%", ESP_BD_ADDR_HEX(bda), param->battery.level);
 +        
-+        // Handle battery level change
-+        handle_battery_change(param->battery.level);
++        // Set update flag for battery change, handle in task to avoid blocking the callback
++        pending_battery_level = param->battery.level;
++        battery_update_pending = true;
 +        
          break;
      }
      case ESP_HIDH_INPUT_EVENT:
-@@ -373,10 +532,128 @@
+@@ -373,10 +537,140 @@
      return ps4_desc_hid_report;
  }
  
@@ -281,11 +286,11 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
 +    return ESP_OK;
 +}
 +
-+// Task to handle LED updates from button press
++// Task to handle LED updates from button press and battery changes
 +void led_button_task(void *pvParameters)
 +{
 +    while (1) {
-+        // Check the trigger flag
++        // Check the trigger flag for button press
 +        if (led_trigger_pending && led_initialized && last_battery_level != -1) {
 +            // Clear flag with critical section to prevent race condition
 +            portDISABLE_INTERRUPTS();
@@ -295,6 +300,18 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
 +            uint32_t red, green, blue;
 +            get_rgb_for_battery_level(last_battery_level, &red, &green, &blue);
 +            trigger_led_with_color(red, green, blue);
++        }
++        
++        // Check for battery update
++        else if (battery_update_pending && led_initialized) {
++            // Clear flag with critical section to prevent race condition
++            portDISABLE_INTERRUPTS();
++            battery_update_pending = false;
++            uint8_t battery_level = pending_battery_level;
++            portENABLE_INTERRUPTS();
++            
++            // Handle battery change in the task context
++            handle_battery_change(battery_level);
 +        }
 +        
 +        vTaskDelay(pdMS_TO_TICKS(1000));
@@ -346,7 +363,7 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
      ret = nvs_flash_init();
      if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
      {
-@@ -385,6 +662,31 @@
+@@ -385,6 +679,31 @@
      }
      ESP_ERROR_CHECK(ret);
  
@@ -378,7 +395,7 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
      ps4_driver_init();
  
      ESP_LOGI(TAG, "USB initialization");
-@@ -410,5 +712,7 @@
+@@ -410,5 +729,7 @@
      };
      ESP_ERROR_CHECK(esp_hidh_init(&config));
  
@@ -387,9 +404,9 @@ diff -urN -x '*.json' esp32s3_org/main/esp_hid_host_main.c esp32s3_patch/main/es
 +
 +    ESP_LOGI(TAG, "System initialization completed");
  }
-diff -urN -x '*.json' esp32s3_org/main/hid_ps4_driver.c esp32s3_patch/main/hid_ps4_driver.c
+diff -urN -x '*.json' -x '*.md' -x .DS_Store -x '*.patch' esp32s3_org/main/hid_ps4_driver.c esp32s3_patch/main/hid_ps4_driver.c
 --- esp32s3_org/main/hid_ps4_driver.c	2026-02-09 18:15:49.000000000 +0800
-+++ esp32s3_patch/main/hid_ps4_driver.c	2026-02-24 08:59:34.000000000 +0800
++++ esp32s3_patch/main/hid_ps4_driver.c	2026-03-16 09:31:33.000000000 +0800
 @@ -280,6 +280,8 @@
  extern const unsigned char ps4_signature_start[] asm("_binary_sig_bin_start");
  extern const unsigned char ps4_signature_end[] asm("_binary_sig_bin_end");
@@ -483,9 +500,9 @@ diff -urN -x '*.json' esp32s3_org/main/hid_ps4_driver.c esp32s3_patch/main/hid_p
      int ret = 0;
      mbedtls_pk_init(&pk);
      ret = mbedtls_pk_parse_key(&pk, (uint8_t *)key_pem_start, key_pem_end - key_pem_start, NULL, 0, rng, NULL);
-diff -urN -x '*.json' esp32s3_org/main/idf_component.yml esp32s3_patch/main/idf_component.yml
+diff -urN -x '*.json' -x '*.md' -x .DS_Store -x '*.patch' esp32s3_org/main/idf_component.yml esp32s3_patch/main/idf_component.yml
 --- esp32s3_org/main/idf_component.yml	2026-02-09 18:15:49.000000000 +0800
-+++ esp32s3_patch/main/idf_component.yml	2026-02-24 08:59:34.000000000 +0800
++++ esp32s3_patch/main/idf_component.yml	2026-03-16 09:31:33.000000000 +0800
 @@ -1,4 +1,5 @@
  ## IDF Component Manager Manifest File
  dependencies:
